@@ -1,13 +1,14 @@
 """Tests for persistent refresh sessions, rotation, replay detection and logout."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from flask_jwt_extended import create_refresh_token
+from sqlalchemy.exc import OperationalError
 
 from teamflow import sessions
 from teamflow.extensions import db
 from teamflow.models import RefreshSession, RefreshToken, User
-from teamflow.models.session import utcnow
+from teamflow.models.session import as_utc, isoformat_utc, utcnow
 from tests.helpers import auth_headers, register
 
 PASSWORD = "CorrectHorse123!"
@@ -322,3 +323,131 @@ def test_revoked_session_cannot_be_revived_by_rotation(client):
     assert response.status_code == 401
     assert response.get_json()["error"]["code"] == "session_revoked"
     assert len(token_rows_for(account["session_id"])) == 1
+
+
+def test_utcnow_is_timezone_aware():
+    moment = utcnow()
+
+    assert moment.tzinfo is not None
+    assert moment.utcoffset() == timedelta(0)
+
+
+def test_as_utc_normalizes_naive_and_aware_timestamps():
+    naive = datetime(2026, 11, 21, 12, 0, 0)
+    berlin = datetime(2026, 11, 21, 13, 0, 0, tzinfo=timezone(timedelta(hours=1)))
+
+    assert as_utc(naive) == datetime(2026, 11, 21, 12, 0, 0, tzinfo=timezone.utc)
+    assert as_utc(berlin) == datetime(2026, 11, 21, 12, 0, 0, tzinfo=timezone.utc)
+    assert as_utc(naive).utcoffset() == timedelta(0)
+
+
+def test_isoformat_utc_marks_naive_values_as_utc():
+    assert isoformat_utc(datetime(2026, 11, 21, 12, 0, 0)) == "2026-11-21T12:00:00Z"
+
+
+def test_session_and_token_expiry_stored_without_timezone_still_refresh(client):
+    account = register(client)
+    session_row = db.session.get(RefreshSession, account["session_id"])
+    token_row = token_rows_for(account["session_id"])[0]
+    # SQLite hands back naive values; write that shape explicitly so the
+    # normalization path is exercised rather than inferred.
+    session_row.expires_at = datetime(2026, 12, 31, 0, 0, 0)
+    token_row.expires_at = datetime(2026, 12, 31, 0, 0, 0)
+    db.session.commit()
+
+    response = refresh(client, account["refresh_token"])
+
+    assert response.status_code == 200
+
+
+def test_naive_expired_session_is_reported_as_expired_not_a_server_error(client):
+    account = register(client)
+    session_row = db.session.get(RefreshSession, account["session_id"])
+    session_row.expires_at = utcnow().replace(tzinfo=None) - timedelta(seconds=1)
+    db.session.commit()
+
+    response = refresh(client, account["refresh_token"])
+
+    assert response.status_code == 401
+    assert response.get_json()["error"]["code"] == "expired_token"
+
+
+def test_database_failure_during_claim_is_not_treated_as_reuse(client, monkeypatch):
+    account = register(client)
+    real_claim = sessions.claim_refresh_token
+
+    def broken_claim(_token_id):
+        raise OperationalError(
+            "UPDATE refresh_tokens SET consumed_at = ?",
+            {},
+            Exception("database is locked"),
+        )
+
+    monkeypatch.setattr(sessions, "claim_refresh_token", broken_claim)
+    failed = refresh(client, account["refresh_token"])
+    monkeypatch.setattr(sessions, "claim_refresh_token", real_claim)
+
+    assert failed.status_code == 500
+    assert failed.get_json()["error"]["code"] == "refresh_failed"
+    # The message must not echo SQL or driver detail.
+    assert "UPDATE" not in failed.get_json()["error"]["message"]
+    assert "database is locked" not in failed.get_json()["error"]["message"]
+
+    db.session.rollback()
+    session_row = db.session.get(RefreshSession, account["session_id"])
+    assert session_row.revoked_at is None
+    # No revocation happened, so the untouched token can still be used.
+    assert refresh(client, account["refresh_token"]).status_code == 200
+
+
+def test_failed_revocation_commit_is_not_reported_as_success(client, monkeypatch):
+    account = register(client)
+    rotated = refresh(client, account["refresh_token"]).get_json()["data"]
+    real_commit = db.session.commit
+
+    def broken_commit():
+        raise OperationalError("COMMIT", {}, Exception("connection reset"))
+
+    monkeypatch.setattr(db.session, "commit", broken_commit)
+    replay = refresh(client, account["refresh_token"])
+    monkeypatch.setattr(db.session, "commit", real_commit)
+
+    assert replay.status_code == 500
+    assert replay.get_json()["error"]["code"] == "revocation_failed"
+
+    db.session.rollback()
+    # The response did not claim a revocation that was never committed.
+    assert db.session.get(RefreshSession, account["session_id"]).revoked_at is None
+    assert rotated["refresh_token"]
+
+
+def test_logout_database_failure_keeps_the_session_active(client, monkeypatch):
+    account = register(client)
+    real_commit = db.session.commit
+
+    def broken_commit():
+        raise OperationalError("COMMIT", {}, Exception("connection reset"))
+
+    monkeypatch.setattr(db.session, "commit", broken_commit)
+    failed = logout(client, account["refresh_token"])
+    monkeypatch.setattr(db.session, "commit", real_commit)
+
+    assert failed.status_code == 500
+    assert failed.get_json()["error"]["code"] == "logout_failed"
+
+    db.session.rollback()
+    assert db.session.get(RefreshSession, account["session_id"]).revoked_at is None
+
+
+def test_refresh_token_expiry_is_serialized_as_explicit_utc(client):
+    account = register(client)
+    data = refresh(client, account["refresh_token"]).get_json()["data"]
+
+    expires = data["refresh_token_expires_at"]
+    assert expires.endswith("Z")
+    parsed = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+
+    session_row = db.session.get(RefreshSession, account["session_id"])
+    assert abs((parsed - as_utc(session_row.expires_at)).total_seconds()) < 1

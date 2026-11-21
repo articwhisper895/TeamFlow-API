@@ -11,6 +11,15 @@ condition and the write atomically, so two requests carrying the same refresh
 token cannot both win: the loser changes zero rows and is treated as token
 reuse. Checking ``consumed_at`` in Python is only used to report a clean
 "already used" error before attempting the claim.
+
+The policy is intentionally strict: only one refresh may run per session at a
+time, simultaneous attempts with the same token count as reuse, and reuse
+revokes that session's whole token family. A client that loses a refresh
+response therefore has to sign in again on that device.
+
+Database failures are never treated as reuse. Every write path rolls back and
+reports a safe service error, so a transient failure cannot revoke a session or
+permanently consume the caller's token.
 """
 
 from flask import current_app
@@ -20,7 +29,10 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from teamflow.extensions import db
 from teamflow.models import RefreshSession, RefreshToken
-from teamflow.models.session import new_session_id, utcnow
+from teamflow.models.session import as_utc, isoformat_utc, new_session_id, utcnow
+
+# Deliberately generic: database detail must never reach the client.
+_RETRY_MESSAGE = "The session could not be refreshed. Try again."
 
 
 class RefreshError(Exception):
@@ -59,7 +71,7 @@ def _payload(
         "refresh_token": refresh_token,
         "token_type": "Bearer",
         "session_id": session.id,
-        "refresh_token_expires_at": session.expires_at.isoformat(),
+        "refresh_token_expires_at": isoformat_utc(session.expires_at),
     }
     if rotated is not None:
         payload["refresh_token_rotated"] = rotated
@@ -113,8 +125,22 @@ def _load_session(session_id: object, user_id: int) -> RefreshSession:
 
 
 def _revoke_family(session: RefreshSession, reason: str) -> None:
+    """Persist a family revocation; a database error is left to the caller."""
     session.revoke(reason)
     db.session.commit()
+
+
+def _revoke_family_or_fail(session: RefreshSession, reason: str) -> None:
+    """Revoke a family, or report a failure instead of claiming success."""
+    try:
+        _revoke_family(session, reason)
+    except SQLAlchemyError:
+        db.session.rollback()
+        raise RefreshError(
+            "revocation_failed",
+            "The session could not be revoked. Try again.",
+            500,
+        ) from None
 
 
 def rotate(user_id: int, session_id: object, jti: object) -> dict:
@@ -123,7 +149,7 @@ def rotate(user_id: int, session_id: object, jti: object) -> dict:
 
     if session.revoked_at is not None:
         raise RefreshError("session_revoked", "This session has been revoked. Sign in again.")
-    if session.expires_at <= utcnow():
+    if as_utc(session.expires_at) <= utcnow():
         raise RefreshError("expired_token", "The refresh session has expired. Sign in again.")
     if not isinstance(jti, str):
         raise RefreshError("invalid_refresh_token", "This refresh token is not recognised. Sign in again.")
@@ -141,18 +167,28 @@ def rotate(user_id: int, session_id: object, jti: object) -> dict:
         # A token that already produced a replacement is being replayed. That
         # means the credential leaked or the client reuses stale tokens, so the
         # whole family is retired. Other sessions of this user stay valid.
-        _revoke_family(session, "refresh_token_reuse")
+        _revoke_family_or_fail(session, "refresh_token_reuse")
         raise RefreshError(
             "refresh_token_reused",
             "This refresh token was already used, so the session has been revoked. Sign in again.",
         )
 
-    if token.expires_at <= utcnow():
+    if as_utc(token.expires_at) <= utcnow():
         raise RefreshError("expired_token", "The refresh token has expired. Sign in again.")
 
-    if not claim_refresh_token(token.id):
+    try:
+        # The claim is part of the same transaction as the replacement insert.
+        # A database failure here is a service error, never evidence of reuse.
+        claimed = claim_refresh_token(token.id)
+    except SQLAlchemyError:
+        db.session.rollback()
+        raise RefreshError("refresh_failed", _RETRY_MESSAGE, 500) from None
+
+    if not claimed:
         # Another request consumed the row between our read and our write.
-        _revoke_family(session, "refresh_token_reuse")
+        # That is byte-for-byte indistinguishable from a replay, so it is
+        # treated the same way: the family is revoked.
+        _revoke_family_or_fail(session, "refresh_token_reuse")
         raise RefreshError(
             "refresh_token_reused",
             "This refresh token was already used, so the session has been revoked. Sign in again.",
@@ -177,11 +213,7 @@ def rotate(user_id: int, session_id: object, jti: object) -> dict:
         # the old token to an unconsumed state, so a failed refresh cannot
         # silently burn the caller's only credential.
         db.session.rollback()
-        raise RefreshError(
-            "refresh_failed",
-            "The session could not be refreshed. Try again.",
-            500,
-        ) from None
+        raise RefreshError("refresh_failed", _RETRY_MESSAGE, 500) from None
 
     return _payload(session, access_token, refresh_token, rotated=True)
 
@@ -192,5 +224,15 @@ def end_session(user_id: int, session_id: object) -> dict:
     already_revoked = session.revoked_at is not None
     if not already_revoked:
         session.revoke("logout")
-        db.session.commit()
+        try:
+            db.session.commit()
+        except SQLAlchemyError:
+            # The rollback restores the active session; report failure rather
+            # than telling the client it has been signed out.
+            db.session.rollback()
+            raise RefreshError(
+                "logout_failed",
+                "The session could not be closed. Try again.",
+                500,
+            ) from None
     return {"session_id": session.id, "revoked": True, "already_revoked": already_revoked}

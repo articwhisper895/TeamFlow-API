@@ -129,7 +129,7 @@ After the initial migration is created, commit the entire `migrations/` director
 
 ## Try the API in Postman
 
-Import `postman/TeamFlow.postman_collection.json` into Postman. Start the API, run **Register** and **Create project**, then run **Register teammate (run once)** to create the sample second account. Next run **Add project member**, **Create task** and **List tasks**. If the teammate account already exists, skip its registration request. The collection stores the access token and created project/task IDs in collection variables.
+Import `postman/TeamFlow.postman_collection.json` into Postman. Start the API, run **Register** and **Create project**, then run **Register teammate (run once)** to create the sample second account. Next run **Add project member**, **Create task** and **List tasks**. If the teammate account already exists, skip its registration request. The collection stores the access token and created project/task IDs in collection variables. **Refresh tokens (rotates)** replaces both stored tokens, and **Logout (revoke this session)** is last because it revokes the session and clears them.
 
 ## Run tests
 
@@ -139,7 +139,20 @@ pytest --cov=teamflow --cov-report=term-missing
 ruff check .
 ```
 
-The tests use an in-memory SQLite database and do not need a separate database server. They cover the main happy paths as well as important negative cases: invalid credentials, weak passwords, duplicate accounts, missing authentication, non-member access, non-owner project changes, and assignment to someone outside the project. Session tests add rotation single-use behaviour, replay-driven family revocation, per-device isolation, logout, expiry, deleted accounts, tokens presented against another user's session, and rollback safety when the rotation write fails.
+The tests use an in-memory SQLite database and do not need a separate database server. They cover the main happy paths as well as important negative cases: invalid credentials, weak passwords, duplicate accounts, missing authentication, non-member access, non-owner project changes, and assignment to someone outside the project. Session tests add rotation single-use behaviour, replay-driven family revocation, per-device isolation, logout, expiry, deleted accounts, tokens presented against another user's session, timestamp normalization, and rollback safety when a rotation, revocation or logout write fails.
+
+`tests/test_refresh_concurrency.py` is a genuine race test: it uses a temporary file-backed SQLite database, two real threads and two separate Flask test clients released by a barrier, then calls the real `/api/v1/auth/refresh` endpoint ten times over. It asserts that exactly one request wins, the loser gets `401 refresh_token_reused`, the family is revoked in the database and the winner's replacement token is therefore unusable.
+
+### PostgreSQL integration tests
+
+A second, opt-in suite exercises the same session flow against PostgreSQL:
+
+```bash
+export TEAMFLOW_POSTGRES_URL=postgresql+psycopg://teamflow:teamflow@localhost:5432/teamflow_test
+pytest tests/test_postgres_integration.py -q
+```
+
+Point it at a **disposable** database: the fixture runs the real Alembic migrations and downgrades to base afterwards. It covers migration execution, timezone-aware timestamp comparisons, two concurrent refreshes on separate connections and foreign-key cascades. The suite skips when the variable is unset, so the normal SQLite run is unaffected. `.github/workflows/tests.yml` adds a `postgres-integration` job with a PostgreSQL 16 service; that job has not run yet, so PostgreSQL compatibility is prepared but **unverified**.
 
 ## API reference
 
@@ -189,12 +202,20 @@ The API does not treat a refresh token as a reusable key. Each successful `POST 
   "refresh_token": "…",
   "token_type": "Bearer",
   "session_id": "4d1f…",
-  "refresh_token_expires_at": "2026-12-05T12:00:00",
+  "refresh_token_expires_at": "2026-12-05T12:00:00Z",
   "refresh_token_rotated": true
 }
 ```
 
-Clients must store the returned `refresh_token` and discard the old one. Reusing a consumed token is treated as replay: the API answers `401 refresh_token_reused` and revokes that whole session family, because a token that was already exchanged should never appear again. Errors on this path are `invalid_refresh_token`, `session_revoked`, `expired_token`, `refresh_token_reused` and, if the database write fails, `500 refresh_failed`.
+Timestamps in responses are ISO 8601 in UTC with an explicit `Z`, so clients never have to guess which timezone an expiry belongs to.
+
+**Strict rotation rules.** The server allows one refresh per session at a time, and the rules are enforced rather than advisory:
+
+- Store both returned tokens immediately and discard the previous refresh token; the response is the only place the replacement exists.
+- Sending a refresh token twice — two overlapping requests, or a retry after a lost response — is treated as reuse. The API answers `401 refresh_token_reused` and revokes that session's whole token family, so the client must sign in again on that device. The user's other sessions stay signed in.
+- Do not run parallel refreshes for one session. A single-flight refresh queue on the client is the correct design.
+
+Errors on this path are `invalid_refresh_token`, `session_revoked`, `expired_token` and `refresh_token_reused`, plus service errors that revoke nothing: `500 refresh_failed` (the rotation could not be completed; the same token can be retried), `500 revocation_failed` (reuse was detected but the revocation could not be committed) and `500 logout_failed` (logout did not take effect). Database failures are never reported as token reuse, and error responses never include SQL, connection strings or driver details.
 
 Every registration and every login opens a **separate session**. A session groups the refresh tokens that rotate into each other (a token family). Revoking one session therefore leaves the user's other devices signed in:
 
@@ -283,7 +304,7 @@ Before treating this as production-ready, the next improvements should include:
 
 1. Add rate limiting to registration and login, plus audit logging for authentication events.
 2. Add access-token revocation (for example a short denylist or a per-session token version) so logout takes effect immediately instead of after the access token expires.
-3. Add integration tests against PostgreSQL and run migrations in CI.
+3. Finish PostgreSQL verification: the opt-in suite and CI service are prepared, but they have not executed against a real PostgreSQL server yet.
 4. Add structured request logging, metrics, health checks for database connectivity and error monitoring.
 5. Add deployment configuration, managed secrets, database backups and a documented recovery procedure.
 6. Review authorization rules with a threat model, including member removal and task reassignment edge cases.

@@ -9,6 +9,11 @@ Only the JWT identifier (``jti``) is stored, never the signed refresh token.
 A database leak therefore exposes identifiers that cannot be replayed as
 credentials, because the attacker still cannot produce a token the server's
 signing key will accept.
+
+Timestamps are handled as timezone-aware UTC. PostgreSQL returns aware values
+for ``TIMESTAMP WITH TIME ZONE``, while SQLite drops the offset and returns
+naive values, so stored timestamps are always normalized with :func:`as_utc`
+before they are compared with :func:`utcnow`.
 """
 
 from datetime import datetime, timezone
@@ -18,13 +23,25 @@ from teamflow.extensions import db
 
 
 def utcnow() -> datetime:
-    """Return the current UTC time as a naive datetime.
+    """Return the current time as a timezone-aware UTC datetime."""
+    return datetime.now(timezone.utc)
 
-    SQLite discards timezone information, so values read back from the database
-    are naive. Storing naive UTC consistently keeps comparisons valid on SQLite
-    (tests and local development) and on PostgreSQL.
+
+def as_utc(value: datetime) -> datetime:
+    """Normalize a timestamp to timezone-aware UTC.
+
+    Naive values are treated as UTC because that is how they were written; an
+    aware value from PostgreSQL is converted rather than reinterpreted. This
+    keeps expiry comparisons correct on both database engines.
     """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def isoformat_utc(value: datetime) -> str:
+    """Serialize a timestamp as ISO 8601 with an explicit UTC designator."""
+    return as_utc(value).isoformat().replace("+00:00", "Z")
 
 
 def new_session_id() -> str:
@@ -59,9 +76,6 @@ class RefreshSession(db.Model):
         order_by="RefreshToken.issued_at",
     )
 
-    def is_active(self) -> bool:
-        return self.revoked_at is None and self.expires_at > utcnow()
-
     def revoke(self, reason: str) -> None:
         """Revoke this session once; the first reason is kept for the audit trail."""
         if self.revoked_at is None:
@@ -71,11 +85,11 @@ class RefreshSession(db.Model):
     def to_dict(self) -> dict:
         return {
             "id": self.id,
-            "created_at": self.created_at.isoformat(),
-            "expires_at": self.expires_at.isoformat(),
-            "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,
+            "created_at": isoformat_utc(self.created_at),
+            "expires_at": isoformat_utc(self.expires_at),
+            "revoked_at": isoformat_utc(self.revoked_at) if self.revoked_at else None,
             "revoked_reason": self.revoked_reason,
-            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "last_used_at": isoformat_utc(self.last_used_at) if self.last_used_at else None,
         }
 
 
@@ -109,8 +123,8 @@ class RefreshToken(db.Model):
         return {
             "id": self.id,
             "session_id": self.session_id,
-            "issued_at": self.issued_at.isoformat(),
-            "expires_at": self.expires_at.isoformat(),
-            "consumed_at": self.consumed_at.isoformat() if self.consumed_at else None,
+            "issued_at": isoformat_utc(self.issued_at),
+            "expires_at": isoformat_utc(self.expires_at),
+            "consumed_at": isoformat_utc(self.consumed_at) if self.consumed_at else None,
             "replaced_by_id": self.replaced_by_id,
         }
