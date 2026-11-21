@@ -133,14 +133,12 @@ def test_non_member_cannot_update_task(client):
         json={"title": "Private project task"},
     ).get_json()["data"]
 
-    # Outsider attempts to change the task title.
     denied = client.patch(
         f"/api/v1/tasks/{created['id']}",
         headers=auth_headers(outsider["access_token"]),
         json={"title": "Unauthorized modification"},
     )
 
-    # Owner checks that the original title remains unchanged.
     unchanged = client.get(
         f"/api/v1/tasks/{created['id']}",
         headers=auth_headers(owner["access_token"]),

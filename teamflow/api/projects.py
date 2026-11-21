@@ -9,6 +9,7 @@ from teamflow.api.utils import (
     current_user,
     error,
     json_body,
+    normalized_email,
     pagination_args,
     project_for_member,
     success,
@@ -144,16 +145,10 @@ def add_member(project_id: int):
     unsupported = unsupported_field_message(body, MEMBERSHIP_FIELDS)
     if unsupported:
         return error(unsupported)
-    email = body.get("email")
-    if not isinstance(email, str) or "@" not in email:
+    email = normalized_email(body.get("email"))
+    if email is None:
         return error("A valid member email address is required.")
-    from email_validator import EmailNotValidError, validate_email
-
-    try:
-        normalized_email = validate_email(email.strip(), check_deliverability=False).normalized.lower()
-    except EmailNotValidError:
-        return error("A valid member email address is required.")
-    member = db.session.scalar(db.select(User).where(User.email == normalized_email))
+    member = db.session.scalar(db.select(User).where(User.email == email))
     if member is None:
         return error("No registered user was found with that email.", 404, "user_not_found")
     if project.has_member(member.id):

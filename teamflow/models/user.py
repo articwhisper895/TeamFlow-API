@@ -1,10 +1,9 @@
 """User model and password handling."""
 
-from datetime import datetime, timezone
-
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from teamflow.extensions import db
+from teamflow.timeutils import isoformat_utc, utcnow
 
 
 class User(db.Model):
@@ -14,7 +13,7 @@ class User(db.Model):
     name = db.Column(db.String(120), nullable=False)
     email = db.Column(db.String(255), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
-    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utcnow)
 
     memberships = db.relationship(
         "ProjectMembership", back_populates="user", cascade="all, delete-orphan"
@@ -36,5 +35,5 @@ class User(db.Model):
             "id": self.id,
             "name": self.name,
             "email": self.email,
-            "created_at": self.created_at.isoformat(),
+            "created_at": isoformat_utc(self.created_at),
         }

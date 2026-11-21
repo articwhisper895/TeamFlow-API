@@ -8,7 +8,7 @@ from sqlalchemy.exc import OperationalError
 from teamflow import sessions
 from teamflow.extensions import db
 from teamflow.models import RefreshSession, RefreshToken, User
-from teamflow.models.session import as_utc, isoformat_utc, utcnow
+from teamflow.timeutils import as_utc, isoformat_utc, utcnow
 from tests.helpers import auth_headers, register
 
 PASSWORD = "CorrectHorse123!"

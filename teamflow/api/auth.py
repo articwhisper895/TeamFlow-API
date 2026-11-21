@@ -1,6 +1,5 @@
 """Registration, login, token refresh, logout and current-user endpoints."""
 
-from email_validator import EmailNotValidError, validate_email
 from flask import Blueprint
 from flask_jwt_extended import get_jwt, jwt_required
 from sqlalchemy.exc import IntegrityError
@@ -9,6 +8,7 @@ from teamflow.api.utils import (
     current_user,
     error,
     json_body,
+    normalized_email,
     success,
     unsupported_field_message,
 )
@@ -23,15 +23,6 @@ REGISTER_FIELDS = frozenset({"name", "email", "password"})
 LOGIN_FIELDS = frozenset({"email", "password"})
 
 
-def _normalized_email(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return validate_email(value.strip(), check_deliverability=False).normalized.lower()
-    except EmailNotValidError:
-        return None
-
-
 @auth_bp.post("/register")
 def register():
     body = json_body()
@@ -39,7 +30,7 @@ def register():
     if unsupported:
         return error(unsupported)
     name = body.get("name")
-    email = _normalized_email(body.get("email"))
+    email = normalized_email(body.get("email"))
     password = body.get("password")
 
     if not isinstance(name, str) or not name.strip() or len(name.strip()) > 120:
@@ -75,7 +66,7 @@ def login():
     unsupported = unsupported_field_message(body, LOGIN_FIELDS)
     if unsupported:
         return error(unsupported)
-    email = _normalized_email(body.get("email"))
+    email = normalized_email(body.get("email"))
     password = body.get("password")
     if email is None or not isinstance(password, str):
         return error("A valid email and password are required.", 401, "invalid_credentials")

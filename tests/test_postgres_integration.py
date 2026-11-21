@@ -7,9 +7,8 @@ Alembic migrations and drop the schema again afterwards:
     pytest tests/test_postgres_integration.py -q
 
 They are skipped when the variable is unset, so the default SQLite suite is
-unchanged. CI runs them in the ``postgres-integration`` job. They have not been
-executed on the development machine (no PostgreSQL server or container runtime
-was available), so PostgreSQL compatibility is unverified until that job runs.
+unchanged. CI runs them in the ``postgres-integration`` job against a
+PostgreSQL 16 service, which is where they are verified.
 """
 
 import os

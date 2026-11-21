@@ -29,7 +29,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from teamflow.extensions import db
 from teamflow.models import RefreshSession, RefreshToken
-from teamflow.models.session import as_utc, isoformat_utc, new_session_id, utcnow
+from teamflow.models.session import new_session_id
+from teamflow.timeutils import as_utc, isoformat_utc, utcnow
 
 # Deliberately generic: database detail must never reach the client.
 _RETRY_MESSAGE = "The session could not be refreshed. Try again."
