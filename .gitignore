@@ -1,0 +1,47 @@
+# Local secrets and environment overrides (never commit real values)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode and build artefacts
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+site/
+
+# Test, lint and type-check caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.cache/
+
+# Coverage reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Local databases (SQLite and Flask instance folder)
+instance/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
