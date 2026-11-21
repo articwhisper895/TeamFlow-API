@@ -1,14 +1,6 @@
 from teamflow.extensions import db
 from teamflow.models import ProjectMembership, Task
-from tests.helpers import auth_headers, register
-
-
-def create_project(client, token, name="Launch website"):
-    return client.post(
-        "/api/v1/projects",
-        headers=auth_headers(token),
-        json={"name": name, "description": "A project used to test the API."},
-    )
+from tests.helpers import auth_headers, create_project, register
 
 
 def test_owner_can_create_and_list_project(client):
@@ -145,7 +137,6 @@ def test_removed_member_cannot_access_project_or_task(client):
         owner["access_token"],
     ).get_json()["data"]
 
-    # Add Grace to the project.
     added = client.post(
         f"/api/v1/projects/{project['id']}/members",
         headers=auth_headers(owner["access_token"]),
@@ -153,20 +144,17 @@ def test_removed_member_cannot_access_project_or_task(client):
     )
     assert added.status_code == 201
 
-    # Create a task in the project.
     task = client.post(
         f"/api/v1/projects/{project['id']}/tasks",
         headers=auth_headers(owner["access_token"]),
         json={"title": "Prepare project report"},
     ).get_json()["data"]
 
-    # Remove Grace from the project.
     removed = client.delete(
         f"/api/v1/projects/{project['id']}/members/{member['user']['id']}",
         headers=auth_headers(owner["access_token"]),
     )
 
-    # Grace tries to access the project and task again.
     project_access = client.get(
         f"/api/v1/projects/{project['id']}",
         headers=auth_headers(member["access_token"]),
@@ -194,26 +182,22 @@ def test_non_owner_member_cannot_delete_project(client):
         owner["access_token"],
     ).get_json()["data"]
 
-    # Add Grace as a project member.
     client.post(
         f"/api/v1/projects/{project['id']}/members",
         headers=auth_headers(owner["access_token"]),
         json={"email": "grace@example.com"},
     )
 
-    # Confirm Grace can access the project.
     visible = client.get(
         f"/api/v1/projects/{project['id']}",
         headers=auth_headers(member["access_token"]),
     )
 
-    # Grace attempts to delete the project.
     denied = client.delete(
         f"/api/v1/projects/{project['id']}",
         headers=auth_headers(member["access_token"]),
     )
 
-    # The owner checks that the project still exists.
     still_exists = client.get(
         f"/api/v1/projects/{project['id']}",
         headers=auth_headers(owner["access_token"]),
@@ -265,7 +249,6 @@ def test_owner_and_member_can_list_project_members(client):
 
     assert added.status_code == 201
 
-    # Both the owner and member request the member list.
     owner_response = client.get(
         f"/api/v1/projects/{project['id']}/members",
         headers=auth_headers(owner["access_token"]),

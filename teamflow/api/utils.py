@@ -1,5 +1,6 @@
-"""Small shared helpers for predictable JSON APIs."""
+"""Shared request, response, validation and access helpers."""
 
+from email_validator import EmailNotValidError, validate_email
 from flask import jsonify, request
 from flask_jwt_extended import get_current_user
 
@@ -27,6 +28,16 @@ def unsupported_field_message(body: dict, allowed: set[str] | frozenset[str]) ->
     if not unknown:
         return None
     return f"Unsupported field(s): {', '.join(unknown)}."
+
+
+def normalized_email(value: object) -> str | None:
+    """Return a normalized email address, or None when the value is not one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return validate_email(value.strip(), check_deliverability=False).normalized.lower()
+    except EmailNotValidError:
+        return None
 
 
 def success(data, status: int = 200, **meta):

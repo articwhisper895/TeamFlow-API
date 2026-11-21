@@ -1,8 +1,7 @@
 """Project and project-membership models."""
 
-from datetime import datetime, timezone
-
 from teamflow.extensions import db
+from teamflow.timeutils import isoformat_utc, utcnow
 
 
 class Project(db.Model):
@@ -11,13 +10,12 @@ class Project(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(160), nullable=False)
     description = db.Column(db.Text, nullable=False, default="")
-    owner_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    owner_id = db.Column(
+        db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = db.Column(
-        db.DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        db.DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
     )
 
     owner = db.relationship("User", foreign_keys=[owner_id])
@@ -35,8 +33,8 @@ class Project(db.Model):
             "name": self.name,
             "description": self.description,
             "owner_id": self.owner_id,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "created_at": isoformat_utc(self.created_at),
+            "updated_at": isoformat_utc(self.updated_at),
         }
         if include_members:
             result["members"] = [membership.to_dict() for membership in self.memberships]
@@ -54,7 +52,7 @@ class ProjectMembership(db.Model):
     project_id = db.Column(db.Integer, db.ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     role = db.Column(db.String(20), nullable=False, default="member")
-    joined_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    joined_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utcnow)
 
     project = db.relationship("Project", back_populates="memberships")
     user = db.relationship("User", back_populates="memberships")
@@ -65,5 +63,5 @@ class ProjectMembership(db.Model):
             "name": self.user.name,
             "email": self.user.email,
             "role": self.role,
-            "joined_at": self.joined_at.isoformat(),
+            "joined_at": isoformat_utc(self.joined_at),
         }

@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "a4f6d5a7-1be4-4b09-b57b-3a9cce4b58d1",
     "name": "TeamFlow API",
-    "description": "Manual API smoke tests. Register or log in first, then create a project and exercise the project/task routes. Register the Grace Hopper teammate once before using Add project member. If the account already exists, skip that registration request.",
+    "description": "Manual walkthrough of the API. Run the requests in order on a fresh database. Test scripts store the access token, refresh token and created ids as collection variables. Refresh tokens (rotates) replaces both stored tokens; Logout (revoke this session) is last because it revokes the session and clears them. The accounts and passwords here are test data only.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -56,7 +56,6 @@
               "  const data = pm.response.json().data;",
               "  pm.collectionVariables.set('accessToken', data.access_token);",
               "  pm.collectionVariables.set('refreshToken', data.refresh_token);",
-              "  pm.collectionVariables.set('memberId', data.user.id);",
               "}"
             ]
           }
@@ -121,6 +120,35 @@
         ],
         "url": "{{baseUrl}}/api/v1/auth/me"
       }
+    },
+    {
+      "name": "Refresh tokens (rotates)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 200) {",
+              "  const data = pm.response.json().data;",
+              "  pm.collectionVariables.set('accessToken', data.access_token);",
+              "  pm.collectionVariables.set('refreshToken', data.refresh_token);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{refreshToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/v1/auth/refresh"
+      },
+      "description": "Single-use rotation. This replaces BOTH stored tokens: the test script saves the new access and refresh tokens. Running it again with the previous refresh token returns 401 refresh_token_reused and revokes this session, so treat a lost response as a reason to sign in again."
     },
     {
       "name": "Create project",
@@ -229,6 +257,33 @@
       }
     },
     {
+      "name": "List project members",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const members = pm.response.json().data || [];",
+              "const email = pm.collectionVariables.get('memberEmail');",
+              "const match = members.find((member) => member.email === email);",
+              "if (match) { pm.collectionVariables.set('memberId', match.user_id); }"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{accessToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/v1/projects/{{projectId}}/members"
+      }
+    },
+    {
       "name": "Create task",
       "event": [
         {
@@ -272,6 +327,34 @@
         ],
         "url": "{{baseUrl}}/api/v1/projects/{{projectId}}/tasks?page=1&limit=20"
       }
+    },
+    {
+      "name": "Logout (revoke this session)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 200) {",
+              "  pm.collectionVariables.set('accessToken', '');",
+              "  pm.collectionVariables.set('refreshToken', '');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{refreshToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/v1/auth/logout"
+      },
+      "description": "Run this last. Revokes only the session whose refresh token is sent, then clears the stored tokens after a confirmed 200 response. Other sessions stay signed in."
     }
   ]
 }

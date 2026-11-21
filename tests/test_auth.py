@@ -4,7 +4,7 @@ from flask_jwt_extended import create_access_token
 
 from teamflow.extensions import db
 from teamflow.models import User
-from tests.helpers import auth_headers, register
+from tests.helpers import auth_headers, create_project, register
 
 
 def delete_account(user_id):
@@ -13,14 +13,6 @@ def delete_account(user_id):
     assert user is not None
     db.session.delete(user)
     db.session.commit()
-
-
-def create_project(client, token, name="Launch website"):
-    return client.post(
-        "/api/v1/projects",
-        headers=auth_headers(token),
-        json={"name": name, "description": "A project used to test the API."},
-    )
 
 
 def test_register_returns_user_and_token_pair(client):
