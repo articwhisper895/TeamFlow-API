@@ -178,7 +178,8 @@ project.
 
 `tests/test_rate_limiting.py` covers the credential limits: account and address
 lockout, the growing backoff, the identical response for known and unknown
-accounts, the reset after a successful sign-in, and the disable switch.
+accounts, the reset after a successful sign-in, the disable switch, the counter
+holding under parallel failures, and pruning of expired counters.
 
 `tests/test_refresh_concurrency.py` runs two real threads against a
 file-backed SQLite database and the real refresh endpoint. It asserts that one
@@ -315,10 +316,24 @@ which also bounds the account-existence probe that registration's `409`
 response permits.
 
 Counters are rows in the database (`rate_limits`), so several workers sharing a
-database enforce one shared view of recent failures. The client address is
-`request.remote_addr`; `X-Forwarded-For` is ignored because a client can forge
-it, so a deployment behind a reverse proxy must have that proxy pass the real
-address.
+database enforce one shared view of recent failures. Each change is a single
+conditional statement: `UPDATE rate_limits SET attempts = attempts + 1` lets the
+database apply two simultaneous failures to the value it holds, so parallel
+requests cannot both read one total and store the same result.
+
+The client address is `request.remote_addr`; `X-Forwarded-For` is ignored because
+a client can forge it, so a deployment behind a reverse proxy must have that
+proxy pass the real address.
+
+Expired counters are removed by a command, not on the request path:
+
+```bash
+flask --app teamflow:create_app prune-rate-limits
+```
+
+Run it from cron (daily is enough). A counter is deleted once its counting
+window and any block it started have both passed, so the table only holds
+recent failures.
 
 Stored data: the database keeps the session id, owner, timestamps and
 revocation reason, and per token only the JWT identifier (`jti`), issue and
@@ -348,6 +363,8 @@ test data only.
 - The rate limits key on the connecting address only. Client addresses behind a
   proxy or NAT are therefore shared, and the application does not read forwarded
   headers.
+- Pruning of expired rate-limit counters is a scheduled command rather than
+  automatic work on the request path, so the table grows until it runs.
 - No email verification, password reset or account-deletion endpoint.
 - SQLite is the default local database. PostgreSQL is supported and covered by
   the integration suite, but the application has not been run in a deployed

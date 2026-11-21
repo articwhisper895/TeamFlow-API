@@ -31,7 +31,11 @@ effect of an unrelated edit.
 - `teamflow/throttling.py` owns the credential rate limits and their backoff
   policy; routes ask it whether a request may proceed and report the outcome.
   The counters live in `rate_limits`, so they survive restarts and are shared by
-  every worker on the same database.
+  every worker on the same database. Counters change only through single
+  statements (`attempts = attempts + 1`, conditional deletes) so parallel
+  failures cannot lose an increment; never read a counter, change it in Python
+  and write the total back. `prune_expired` deletes counters that can no longer
+  count or block anything, and the `prune-rate-limits` CLI command runs it.
 - `teamflow/models/*` define persistence; `teamflow/timeutils.py` holds the
   shared UTC convention.
 - `teamflow/api/errors.py` produces the JSON envelope for HTTP and unhandled
@@ -78,7 +82,9 @@ exercises the real endpoint from two threads and asserts a single winner.
 
 Rate limits are disabled in `TestingConfig` because the endpoint suite signs in
 many times from one address. Test them with the explicit configuration in
-`tests/test_rate_limiting.py` rather than by loosening the defaults.
+`tests/test_rate_limiting.py` rather than by loosening the defaults. That module
+also runs parallel failures against a file-backed database to keep the atomic
+counters honest, and covers the pruning command.
 
 PostgreSQL behaviour is verified by the `postgres-integration` CI job. Run it
 locally with `TEAMFLOW_POSTGRES_URL` set to a disposable database. Do not report
