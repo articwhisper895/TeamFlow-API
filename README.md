@@ -21,6 +21,8 @@ Flask-Migrate/Alembic and pytest.
   `404` so the API does not confirm that another user's resource exists.
 - Strict request validation: unknown JSON fields are rejected, and
   server-controlled fields cannot be supplied by clients.
+- Failed sign-ins are rate limited per client address and per account with a
+  growing backoff, and the response never discloses whether an account exists.
 - Versioned schema changes with Alembic, and automated tests for both the
   SQLite test database and PostgreSQL.
 
@@ -127,6 +129,14 @@ setup.
 | `DATABASE_URL` | `sqlite:///teamflow.db` | SQLAlchemy connection URL |
 | `ACCESS_TOKEN_MINUTES` | `15` | Access-token lifetime |
 | `REFRESH_TOKEN_DAYS` | `14` | Absolute session lifetime |
+| `RATE_LIMIT_ENABLED` | `true` | Set to `false` to switch the credential rate limits off |
+| `LOGIN_IP_MAX_FAILURES` | `10` | Failed sign-ins per address before its backoff starts |
+| `LOGIN_ACCOUNT_MAX_FAILURES` | `5` | Failed sign-ins per account before its backoff starts |
+| `LOGIN_FAILURE_WINDOW_SECONDS` | `900` | How far back failures are counted |
+| `LOGIN_BACKOFF_BASE_SECONDS` | `30` | First backoff once a limit is reached |
+| `LOGIN_BACKOFF_MAX_SECONDS` | `900` | Ceiling for the doubling backoff |
+| `REGISTER_IP_MAX_ATTEMPTS` | `20` | Registrations per address per window |
+| `REGISTER_WINDOW_SECONDS` | `3600` | Registration window |
 
 `.env` is read by Flask and is excluded from version control. With
 `APP_ENV=production` the application refuses to start while `SECRET_KEY` still
@@ -165,6 +175,10 @@ covers the happy paths and the failure cases that matter for access control:
 invalid credentials, weak passwords, duplicate accounts, missing tokens,
 non-member access, non-owner changes, and assignment to someone outside the
 project.
+
+`tests/test_rate_limiting.py` covers the credential limits: account and address
+lockout, the growing backoff, the identical response for known and unknown
+accounts, the reset after a successful sign-in, and the disable switch.
 
 `tests/test_refresh_concurrency.py` runs two real threads against a
 file-backed SQLite database and the real refresh endpoint. It asserts that one
@@ -277,9 +291,34 @@ replacement in the same family.
 
 Refresh-path error codes: `invalid_token`, `invalid_refresh_token`,
 `session_revoked`, `expired_token`, `refresh_token_reused`, plus `500`
-`refresh_failed`, `revocation_failed` and `logout_failed`. Database failures are
+`refresh_failed`, `revocation_failed` and `logout_failed`. Throttled credential
+requests return `429` `too_many_attempts`. Database failures are
 never reported as token reuse, and error messages never include SQL, connection
 strings or driver details.
+
+### Brute-force protection
+
+`POST /api/v1/auth/login` counts failed sign-ins twice: per client address and
+per account. Reaching either limit blocks that scope with a backoff that doubles
+for each further failure, from `LOGIN_BACKOFF_BASE_SECONDS` up to
+`LOGIN_BACKOFF_MAX_SECONDS`. A blocked request returns `429` with a
+`Retry-After` header and the code `too_many_attempts`. A successful sign-in
+clears the account's failures; the address counter keeps its count until the
+window expires, so a valid session cannot be used to reset an attack.
+
+The limit applies to unknown addresses too, and a missing account still pays for
+one password hash, so neither the body nor the timing of a `401` or `429` tells
+an attacker whether an account exists.
+
+`POST /api/v1/auth/register` is limited per client address in a fixed window,
+which also bounds the account-existence probe that registration's `409`
+response permits.
+
+Counters are rows in the database (`rate_limits`), so several workers sharing a
+database enforce one shared view of recent failures. The client address is
+`request.remote_addr`; `X-Forwarded-For` is ignored because a client can forge
+it, so a deployment behind a reverse proxy must have that proxy pass the real
+address.
 
 Stored data: the database keeps the session id, owner, timestamps and
 revocation reason, and per token only the JWT identifier (`jti`), issue and
@@ -301,12 +340,14 @@ test data only.
 
 ## Known limitations
 
-- No rate limiting or brute-force lockout on login and registration.
 - Access tokens are not revoked on logout; they remain valid until they expire
   (15 minutes by default). Revoking them immediately would require checking
   session state on every request.
 - No audit log of authentication events and no endpoint for listing or revoking
   other sessions.
+- The rate limits key on the connecting address only. Client addresses behind a
+  proxy or NAT are therefore shared, and the application does not read forwarded
+  headers.
 - No email verification, password reset or account-deletion endpoint.
 - SQLite is the default local database. PostgreSQL is supported and covered by
   the integration suite, but the application has not been run in a deployed

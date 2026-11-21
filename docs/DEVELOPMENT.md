@@ -17,6 +17,9 @@ effect of an unrelated edit.
 7. Passwords are stored as hashes; secrets are never committed.
 8. Each sign-in is a separate session. A refresh token is single-use, and reuse
    revokes only that session's token family.
+9. Failed sign-ins are limited per client address and per account. A credential
+   response must never reveal whether an account exists, including when the
+   request is throttled.
 
 ## Module responsibilities
 
@@ -25,6 +28,10 @@ effect of an unrelated edit.
 - `teamflow/api/*` handle HTTP only: parse, validate, authorize, then delegate.
 - `teamflow/sessions.py` owns the refresh-session lifecycle and the strict
   rotation policy. Route handlers do not manipulate token rows directly.
+- `teamflow/throttling.py` owns the credential rate limits and their backoff
+  policy; routes ask it whether a request may proceed and report the outcome.
+  The counters live in `rate_limits`, so they survive restarts and are shared by
+  every worker on the same database.
 - `teamflow/models/*` define persistence; `teamflow/timeutils.py` holds the
   shared UTC convention.
 - `teamflow/api/errors.py` produces the JSON envelope for HTTP and unhandled
@@ -68,6 +75,10 @@ ruff check .
 Behaviour changes need tests. Authorization changes need both the allowed and
 the denied case. Session changes should keep the concurrency test meaningful: it
 exercises the real endpoint from two threads and asserts a single winner.
+
+Rate limits are disabled in `TestingConfig` because the endpoint suite signs in
+many times from one address. Test them with the explicit configuration in
+`tests/test_rate_limiting.py` rather than by loosening the defaults.
 
 PostgreSQL behaviour is verified by the `postgres-integration` CI job. Run it
 locally with `TEAMFLOW_POSTGRES_URL` set to a disposable database. Do not report
