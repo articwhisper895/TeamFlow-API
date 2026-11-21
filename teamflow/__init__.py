@@ -2,6 +2,7 @@
 
 import os
 
+import click
 from flask import Flask, jsonify
 from sqlalchemy import event
 
@@ -64,6 +65,13 @@ def create_app(config_object: type[Config] | dict | None = None) -> Flask:
     @app.get("/api/health")
     def health():
         return jsonify({"status": "ok", "service": "teamflow-api"}), 200
+
+    @app.cli.command("prune-rate-limits")
+    def prune_rate_limits_command():
+        """Delete credential rate-limit counters whose windows have expired."""
+        from teamflow.throttling import prune_expired
+
+        click.echo(f"Removed {prune_expired()} expired rate-limit counters.")
 
     @jwt.user_lookup_loader
     def load_user(_jwt_header, jwt_data):
