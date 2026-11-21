@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "a4f6d5a7-1be4-4b09-b57b-3a9cce4b58d1",
     "name": "TeamFlow API",
-    "description": "Manual API smoke tests. Register or log in first, then create a project and exercise the project/task routes. Register the Grace Hopper teammate once before using Add project member. If the account already exists, skip that registration request.",
+    "description": "Manual API smoke tests. Register or log in first, then create a project and exercise the project/task routes. Register the Grace Hopper teammate once before using Add project member. If the account already exists, skip that registration request. Refresh tokens are single-use: Refresh tokens (rotates) replaces the stored refreshToken, and reusing an old one revokes that session. Logout (revoke this session) ends only the session whose refresh token is sent.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -120,6 +120,63 @@
           }
         ],
         "url": "{{baseUrl}}/api/v1/auth/me"
+      }
+    },
+    {
+      "name": "Refresh tokens (rotates)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 200) {",
+              "  const data = pm.response.json().data;",
+              "  pm.collectionVariables.set('accessToken', data.access_token);",
+              "  pm.collectionVariables.set('refreshToken', data.refresh_token);",
+              "  console.log('Refresh token rotated for session', data.session_id);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{refreshToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/v1/auth/refresh"
+      }
+    },
+    {
+      "name": "Logout (revoke this session)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 200) {",
+              "  console.log('Revoked session', pm.response.json().data.session_id);",
+              "  pm.collectionVariables.set('accessToken', '');",
+              "  pm.collectionVariables.set('refreshToken', '');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{refreshToken}}"
+          }
+        ],
+        "url": "{{baseUrl}}/api/v1/auth/logout"
       }
     },
     {

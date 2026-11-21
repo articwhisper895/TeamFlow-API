@@ -4,12 +4,13 @@ A portfolio-sized project and task-management REST API built with **Python, Flas
 
 TeamFlow is intentionally small enough to understand end-to-end, but substantial enough to demonstrate the backend skills expected of an early-career developer: API design, relational modelling, authentication, authorization, validation, migrations, automated tests and clear technical documentation.
 
-> **Portfolio project, not a production deployment.** It has a useful security baseline, but before real users or sensitive data are involved it still needs operational controls such as request rate limits, monitoring, backups, a managed secret store, token revocation/rotation policy, deployment hardening and a reviewed threat model.
+> **Portfolio project, not a production deployment.** It has a useful security baseline, but before real users or sensitive data are involved it still needs operational controls such as request rate limits, monitoring, backups, a managed secret store, deployment hardening and a reviewed threat model.
 
 ## What it does
 
 - Register users, securely hash passwords and log in.
-- Issue short-lived JWT access tokens and refresh tokens.
+- Issue short-lived JWT access tokens and single-use, rotating refresh tokens.
+- Detect refresh-token replay, revoke the affected session family, and let each session log out independently.
 - Create, view, update and delete projects.
 - Add and remove registered users from a project.
 - Create, assign, filter, update and delete tasks.
@@ -40,14 +41,16 @@ teamflow/
 ├── __init__.py          # create_app(), extension setup, blueprint registration
 ├── config.py            # environment-based configuration
 ├── extensions.py        # shared SQLAlchemy, JWT and migration extensions
+├── sessions.py          # refresh-session lifecycle: start, rotate, revoke
 ├── api/
-│   ├── auth.py           # register, login, refresh, current user
+│   ├── auth.py           # register, login, refresh, logout, current user
 │   ├── projects.py       # project CRUD and membership management
 │   ├── tasks.py          # task CRUD, assignment and filtering
 │   ├── errors.py         # centralized JSON HTTP errors
 │   └── utils.py          # shared request, response and access helpers
 └── models/
     ├── user.py
+    ├── session.py        # refresh_sessions and refresh_tokens records
     ├── project.py
     └── task.py
 
@@ -136,7 +139,7 @@ pytest --cov=teamflow --cov-report=term-missing
 ruff check .
 ```
 
-The tests use an in-memory SQLite database and do not need a separate database server. They cover the main happy paths as well as important negative cases: invalid credentials, weak passwords, duplicate accounts, missing authentication, non-member access, non-owner project changes, and assignment to someone outside the project.
+The tests use an in-memory SQLite database and do not need a separate database server. They cover the main happy paths as well as important negative cases: invalid credentials, weak passwords, duplicate accounts, missing authentication, non-member access, non-owner project changes, and assignment to someone outside the project. Session tests add rotation single-use behaviour, replay-driven family revocation, per-device isolation, logout, expiry, deleted accounts, tokens presented against another user's session, and rollback safety when the rotation write fails.
 
 ## API reference
 
@@ -163,7 +166,8 @@ Successful responses use a `data` envelope. Paginated list responses also includ
 | POST | `/api/v1/auth/register` | Create an account | No |
 | POST | `/api/v1/auth/login` | Verify credentials and issue tokens | No |
 | GET | `/api/v1/auth/me` | Return the authenticated user | Access token |
-| POST | `/api/v1/auth/refresh` | Issue a new access token | Refresh token |
+| POST | `/api/v1/auth/refresh` | Rotate the refresh token and issue a new pair | Refresh token |
+| POST | `/api/v1/auth/logout` | Revoke this session's refresh family | Refresh token |
 
 Register body (`name`, `email` and `password` are the only accepted fields):
 
@@ -174,6 +178,32 @@ Register body (`name`, `email` and `password` are the only accepted fields):
   "password": "a-long-unique-password"
 }
 ```
+
+### Sessions, rotation and logout
+
+The API does not treat a refresh token as a reusable key. Each successful `POST /api/v1/auth/refresh` **consumes** the token that was sent and returns a replacement:
+
+```json
+{
+  "access_token": "…",
+  "refresh_token": "…",
+  "token_type": "Bearer",
+  "session_id": "4d1f…",
+  "refresh_token_expires_at": "2026-12-05T12:00:00",
+  "refresh_token_rotated": true
+}
+```
+
+Clients must store the returned `refresh_token` and discard the old one. Reusing a consumed token is treated as replay: the API answers `401 refresh_token_reused` and revokes that whole session family, because a token that was already exchanged should never appear again. Errors on this path are `invalid_refresh_token`, `session_revoked`, `expired_token`, `refresh_token_reused` and, if the database write fails, `500 refresh_failed`.
+
+Every registration and every login opens a **separate session**. A session groups the refresh tokens that rotate into each other (a token family). Revoking one session therefore leaves the user's other devices signed in:
+
+- `POST /api/v1/auth/logout` with the current **refresh token** revokes that session. It is idempotent and returns `{"session_id": "…", "revoked": true, "already_revoked": false}`.
+- Subsequent refreshes with that session return `401 session_revoked`.
+- **Access tokens are not revoked.** The server does not check session state when it validates an access token, so an already-issued access token stays usable until it expires (15 minutes by default). Short access-token lifetimes are currently the only limit on that window; a deliberate access-token revocation list would be the next step.
+- Logout requires a refresh token. If the refresh token has already expired, the client cannot call logout; discard the tokens and sign in again.
+
+What is stored: the database never contains a refresh token or its signature. `refresh_sessions` holds the session id (128 random bits), owner, creation and absolute expiry, revocation timestamp and reason, and last rotation time. `refresh_tokens` holds the JWT identifier (`jti`), issue/expiry timestamps, the single `consumed_at` timestamp and a link to the token that replaced it. Rotation consumes a token with one conditional `UPDATE … WHERE consumed_at IS NULL`, so two concurrent requests carrying the same token cannot both succeed; the loser changes zero rows and is handled as replay.
 
 ### Projects and members
 
@@ -252,7 +282,7 @@ The code deliberately keeps request validation near each endpoint and keeps data
 Before treating this as production-ready, the next improvements should include:
 
 1. Add rate limiting to registration and login, plus audit logging for authentication events.
-2. Add token revocation/rotation and a documented logout strategy.
+2. Add access-token revocation (for example a short denylist or a per-session token version) so logout takes effect immediately instead of after the access token expires.
 3. Add integration tests against PostgreSQL and run migrations in CI.
 4. Add structured request logging, metrics, health checks for database connectivity and error monitoring.
 5. Add deployment configuration, managed secrets, database backups and a documented recovery procedure.
