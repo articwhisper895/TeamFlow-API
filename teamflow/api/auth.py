@@ -1,8 +1,8 @@
-"""Registration, login, token refresh and current-user endpoints."""
+"""Registration, login, token refresh, logout and current-user endpoints."""
 
 from email_validator import EmailNotValidError, validate_email
 from flask import Blueprint
-from flask_jwt_extended import create_access_token, create_refresh_token, jwt_required
+from flask_jwt_extended import get_jwt, jwt_required
 from sqlalchemy.exc import IntegrityError
 
 from teamflow.api.utils import (
@@ -14,6 +14,7 @@ from teamflow.api.utils import (
 )
 from teamflow.extensions import db
 from teamflow.models import User
+from teamflow.sessions import RefreshError, end_session, rotate, start_session
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -29,15 +30,6 @@ def _normalized_email(value: object) -> str | None:
         return validate_email(value.strip(), check_deliverability=False).normalized.lower()
     except EmailNotValidError:
         return None
-
-
-def _token_pair(user: User) -> dict:
-    identity = str(user.id)
-    return {
-        "access_token": create_access_token(identity=identity),
-        "refresh_token": create_refresh_token(identity=identity),
-        "token_type": "Bearer",
-    }
 
 
 @auth_bp.post("/register")
@@ -65,12 +57,16 @@ def register():
     user.set_password(password)
     db.session.add(user)
     try:
+        # Flush assigns the user id, so the account and its first refresh session
+        # are written in one transaction: a rejected registration creates neither.
+        db.session.flush()
+        tokens = start_session(user.id, commit=False)
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
         return error("An account with this email already exists.", 409, "email_already_registered")
 
-    return success({"user": user.to_dict(), **_token_pair(user)}, 201)
+    return success({"user": user.to_dict(), **tokens}, 201)
 
 
 @auth_bp.post("/login")
@@ -88,7 +84,8 @@ def login():
     if user is None or not user.check_password(password):
         return error("Email or password is incorrect.", 401, "invalid_credentials")
 
-    return success({"user": user.to_dict(), **_token_pair(user)})
+    # Every login opens its own session, so devices can be revoked separately.
+    return success({"user": user.to_dict(), **start_session(user.id)})
 
 
 @auth_bp.get("/me")
@@ -101,4 +98,20 @@ def me():
 @jwt_required(refresh=True)
 def refresh():
     user = current_user()
-    return success({"access_token": create_access_token(identity=str(user.id)), "token_type": "Bearer"})
+    claims = get_jwt()
+    try:
+        tokens = rotate(user.id, claims.get("sid"), claims.get("jti"))
+    except RefreshError as exc:
+        return error(exc.message, exc.status, exc.code)
+    return success(tokens)
+
+
+@auth_bp.post("/logout")
+@jwt_required(refresh=True)
+def logout():
+    user = current_user()
+    try:
+        result = end_session(user.id, get_jwt().get("sid"))
+    except RefreshError as exc:
+        return error(exc.message, exc.status, exc.code)
+    return success(result)

@@ -21,6 +21,9 @@ class User(db.Model):
     )
     created_tasks = db.relationship("Task", back_populates="creator", foreign_keys="Task.created_by_id")
     assigned_tasks = db.relationship("Task", back_populates="assignee", foreign_keys="Task.assigned_to_id")
+    refresh_sessions = db.relationship(
+        "RefreshSession", back_populates="user", cascade="all, delete-orphan"
+    )
 
     def set_password(self, password: str) -> None:
         self.password_hash = generate_password_hash(password)
